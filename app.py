@@ -64,7 +64,6 @@ html, body, [class*="css"] {{
 #MainMenu, footer, header {{visibility: hidden;}}
 .block-container {{ padding-top: 1.6rem; padding-bottom: 2rem; max-width: 1200px; }}
 
-/* ---------- Brand header ---------- */
 .brand-row {{
     display: flex; align-items: center; gap: 14px;
     margin-bottom: 4px;
@@ -85,7 +84,6 @@ html, body, [class*="css"] {{
     color: {TEXT_MUTED}; font-size: 0.92rem; font-weight: 500; margin-top: 1px;
 }}
 
-/* ---------- Cards ---------- */
 .card {{
     background: {CARD_BG};
     border: 1px solid {BORDER};
@@ -98,7 +96,6 @@ html, body, [class*="css"] {{
     color: {TEXT_MUTED}; text-transform: uppercase; margin-bottom: 0.6rem;
 }}
 
-/* ---------- Risk banner ---------- */
 .risk-card {{
     border-radius: 14px; padding: 1.1rem 1.4rem; margin-bottom: 1rem;
     border-left: 5px solid; display: flex; align-items: center; justify-content: space-between;
@@ -106,7 +103,6 @@ html, body, [class*="css"] {{
 .risk-title {{ font-weight: 700; font-size: 1.05rem; margin: 0; }}
 .risk-value {{ font-weight: 800; font-size: 1.6rem; margin: 0; }}
 
-/* ---------- Disease rows ---------- */
 .disease-row {{
     padding: 0.65rem 0; border-bottom: 1px solid {BORDER};
 }}
@@ -121,7 +117,6 @@ html, body, [class*="css"] {{
 }}
 .bar-fill {{ height: 100%; border-radius: 6px; }}
 
-/* ---------- Footer ---------- */
 .app-footer {{
     text-align: center; color: {TEXT_MUTED}; font-size: 0.8rem;
     margin-top: 2.2rem; padding-top: 1.2rem; border-top: 1px solid {BORDER};
@@ -188,6 +183,63 @@ def prob_color(p: float) -> str:
 
 
 # =========================================================
+# FUNDUS IMAGE VALIDATION
+# =========================================================
+def is_fundus_image(image: Image.Image):
+    """
+    Heuristic check to decide if an image looks like a retinal fundus photo.
+    Returns (is_valid, reason, score).
+    Fundus images are typically: circular retina on dark background,
+    dominated by red/orange/brown tones, with dark corners.
+    """
+    img = image.convert("RGB").resize((256, 256))
+    arr = np.asarray(img).astype(np.float32)
+    r, g, b = arr[:, :, 0], arr[:, :, 1], arr[:, :, 2]
+
+    # 1) Dark corners check (fundus has black corners around the circular retina)
+    h, w = arr.shape[:2]
+    cs = 40  # corner size
+    corners = np.concatenate([
+        arr[:cs, :cs].reshape(-1, 3),
+        arr[:cs, -cs:].reshape(-1, 3),
+        arr[-cs:, :cs].reshape(-1, 3),
+        arr[-cs:, -cs:].reshape(-1, 3),
+    ])
+    corner_brightness = corners.mean()
+    dark_corners = corner_brightness < 60  # corners should be quite dark
+
+    # 2) Center is brighter than corners (retina disc is illuminated)
+    center = arr[h//2 - 40:h//2 + 40, w//2 - 40:w//2 + 40].reshape(-1, 3)
+    center_brightness = center.mean()
+    bright_center = center_brightness > corner_brightness + 25
+
+    # 3) Reddish dominance (retina is red/orange/brown)
+    mean_r, mean_g, mean_b = r.mean(), g.mean(), b.mean()
+    reddish = (mean_r > mean_g) and (mean_r > mean_b)
+    strong_red = mean_r > (mean_b + 15)
+
+    # Scoring
+    checks = [dark_corners, bright_center, reddish, strong_red]
+    score = sum(checks) / len(checks)
+
+    is_valid = score >= 0.5  # at least half the signals must agree
+
+    if is_valid:
+        reason = "Looks like a fundus image."
+    else:
+        problems = []
+        if not dark_corners:
+            problems.append("no dark corners")
+        if not reddish:
+            problems.append("not red/retina-toned")
+        if not bright_center:
+            problems.append("no illuminated center")
+        reason = "Does not look like a fundus image (" + ", ".join(problems) + ")."
+
+    return is_valid, reason, score
+
+
+# =========================================================
 # HEADER
 # =========================================================
 st.markdown(f"""
@@ -225,7 +277,7 @@ with st.sidebar:
     st.markdown("---")
     st.markdown("#### Model")
     st.markdown(
-        "- Architecture: **EfficientNetV2‑S**\n"
+        "- Architecture: **EfficientNetV2-S**\n"
         "- Trained on: **RFMiD** dataset\n"
         "- Detects: **10 conditions**\n"
         "- Validation score: **0.9356**"
@@ -309,52 +361,74 @@ with col_right:
     st.markdown('<div class="section-label">Analysis Results</div>', unsafe_allow_html=True)
 
     if image is not None and model_ok:
-        with st.spinner("Analyzing image..."):
-            risk, probs = predict(image, model)
+        # ---- STEP 1: Validate it's a fundus image ----
+        valid, reason, score = is_fundus_image(image)
 
-        if risk > 0.5:
+        if not valid:
             st.markdown(f"""
-            <div class="risk-card" style="background:#fef2f2; border-left-color:{RED};">
+            <div class="risk-card" style="background:#fffbeb; border-left-color:{AMBER};">
                 <div>
-                    <p class="risk-title" style="color:{RED};">Disease Likely Detected</p>
-                    <p style="color:#991b1b; margin:0; font-size:0.85rem;">Overall screening risk</p>
+                    <p class="risk-title" style="color:{AMBER};">Invalid Image</p>
+                    <p style="color:#92400e; margin:0; font-size:0.85rem;">This does not look like a fundus image</p>
                 </div>
-                <p class="risk-value" style="color:{RED};">{risk:.1%}</p>
             </div>
             """, unsafe_allow_html=True)
+            st.warning(
+                "**Please upload a valid retinal fundus image.**\n\n"
+                "The uploaded image doesn't appear to be a fundus photograph "
+                "(a circular retina image taken by a medical fundus camera). "
+                "Regular photos, selfies, documents, or other images cannot be analyzed.\n\n"
+                f"_Detection reason: {reason}_",
+                icon="⚠️",
+            )
         else:
-            st.markdown(f"""
-            <div class="risk-card" style="background:#f0fdf4; border-left-color:{GREEN};">
-                <div>
-                    <p class="risk-title" style="color:{GREEN};">Likely Normal</p>
-                    <p style="color:#166534; margin:0; font-size:0.85rem;">Overall screening risk</p>
-                </div>
-                <p class="risk-value" style="color:{GREEN};">{risk:.1%}</p>
-            </div>
-            """, unsafe_allow_html=True)
+            # ---- STEP 2: Run analysis ----
+            with st.spinner("Analyzing image..."):
+                risk, probs = predict(image, model)
 
-        st.markdown('<div class="card">', unsafe_allow_html=True)
-        st.markdown('<div class="section-label">Per-Disease Probabilities</div>', unsafe_allow_html=True)
+            if risk > 0.5:
+                st.markdown(f"""
+                <div class="risk-card" style="background:#fef2f2; border-left-color:{RED};">
+                    <div>
+                        <p class="risk-title" style="color:{RED};">Disease Likely Detected</p>
+                        <p style="color:#991b1b; margin:0; font-size:0.85rem;">Overall screening risk</p>
+                    </div>
+                    <p class="risk-value" style="color:{RED};">{risk:.1%}</p>
+                </div>
+                """, unsafe_allow_html=True)
+            else:
+                st.markdown(f"""
+                <div class="risk-card" style="background:#f0fdf4; border-left-color:{GREEN};">
+                    <div>
+                        <p class="risk-title" style="color:{GREEN};">Likely Normal</p>
+                        <p style="color:#166534; margin:0; font-size:0.85rem;">Overall screening risk</p>
+                    </div>
+                    <p class="risk-value" style="color:{GREEN};">{risk:.1%}</p>
+                </div>
+                """, unsafe_allow_html=True)
 
-        order = np.argsort(probs)[::-1]
-        rows_html = ""
-        for i in order:
-            code = DISEASE_ORDER[i]
-            pct = float(probs[i])
-            color = prob_color(pct)
-            rows_html += f"""
-            <div class="disease-row">
-                <div class="disease-top">
-                    <span class="disease-name">{DISEASE_NAMES[code]}</span>
-                    <span class="disease-pct" style="color:{color};">{pct:.1%}</span>
+            st.markdown('<div class="card">', unsafe_allow_html=True)
+            st.markdown('<div class="section-label">Per-Disease Probabilities</div>', unsafe_allow_html=True)
+
+            order = np.argsort(probs)[::-1]
+            rows_html = ""
+            for i in order:
+                code = DISEASE_ORDER[i]
+                pct = float(probs[i])
+                color = prob_color(pct)
+                rows_html += f"""
+                <div class="disease-row">
+                    <div class="disease-top">
+                        <span class="disease-name">{DISEASE_NAMES[code]}</span>
+                        <span class="disease-pct" style="color:{color};">{pct:.1%}</span>
+                    </div>
+                    <div class="bar-track">
+                        <div class="bar-fill" style="width:{pct*100:.1f}%; background:{color};"></div>
+                    </div>
                 </div>
-                <div class="bar-track">
-                    <div class="bar-fill" style="width:{pct*100:.1f}%; background:{color};"></div>
-                </div>
-            </div>
-            """
-        st.markdown(rows_html, unsafe_allow_html=True)
-        st.markdown('</div>', unsafe_allow_html=True)
+                """
+            st.markdown(rows_html, unsafe_allow_html=True)
+            st.markdown('</div>', unsafe_allow_html=True)
 
     elif image is not None and not model_ok:
         st.markdown(
